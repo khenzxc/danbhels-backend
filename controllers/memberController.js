@@ -19,7 +19,11 @@ exports.getMembers = async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'SYSTEM_ERROR: Fetching member ledger failed.' });
+    // Dinagdagan natin ng 'details' para iluwa ang totoong dahilan mula sa MySQL
+    res.status(500).json({ 
+      error: 'SYSTEM_ERROR: Fetching member ledger failed.',
+      details: error.message 
+    });
   }
 };
 
