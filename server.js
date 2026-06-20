@@ -5,7 +5,15 @@ require('dotenv').config();
 const app = express();
 
 // Global System Middlewares
-app.use(cors());
+// Palitan ang app.use(cors()); ng configuration na ito:
+app.use(cors({
+  origin: [
+    'http://localhost:5173', // Para gumana kapag nagte-test ka locally gamit ang Vite
+    'https://danbhels-gym.vercel.app' // IPALIT MO DITO ANG TOTOONG LIVE URL NG FRONTEND MO NA GALING SA VERCEL
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+}));
 app.use(express.json());
 
 // Main Routing Mounting Point Pipelines
