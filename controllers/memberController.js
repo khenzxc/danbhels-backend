@@ -126,9 +126,8 @@ exports.renewMember = async (req, res) => {
 
 // @desc    Magrehistro ng bagong miyembro/atleta sa matrix pipeline
 // @route   POST /api/members
-// FIXED: Idinagdag ang createMember module upang maalis ang 404 block routing fail
+// FIXED: Binago upang i-support ang VARCHAR member_id (IR-XXX format) para hindi mag-500 Error sa MySQL
 exports.createMember = async (req, res) => {
-  // Sinalo ang payment_status na pinadala ng AddMemberModal component layout
   const { name, plan_id, status, payment_status } = req.body;
   const connection = await db.getConnection();
 
@@ -147,7 +146,11 @@ exports.createMember = async (req, res) => {
     }
     const plan = planRows[0];
 
-    // 2. KALKULAHIN ANG EXPIRY DATE MULA SA KASALUKUYANG ARAW (joined_date)
+    // 2. FIXED: GENERATE CUSTOM 'IR-' PREFIX MEMBER_ID (Dahil VARCHAR at hindi auto-increment)
+    const randomDigits = Math.floor(100 + Math.random() * 900); // Naglilikha ng random 3 digits (100-999)
+    const generatedMemberId = `IR-${randomDigits}`;
+
+    // 3. KALKULAHIN ANG EXPIRY DATE MULA SA KASALUKUYANG ARAW (joined_date)
     const today = new Date();
     const expiryDateObj = new Date();
     expiryDateObj.setDate(today.getDate() + Number(plan.duration_days || 30));
@@ -155,24 +158,22 @@ exports.createMember = async (req, res) => {
     const formattedJoinedDate = today.toISOString().split('T')[0];
     const formattedExpiryDate = expiryDateObj.toISOString().split('T')[0];
 
-    // 3. I-INSERT ANG BAGONG ATHLETE PROFILE RECORD SA ATING DATABASE
-    const [insertResult] = await connection.query(
+    // 4. FIXED SQL INSERT: Isinama na ang 'member_id' field sa query statement array
+    await connection.query(
       `
-      INSERT INTO members (name, plan_id, joined_date, expiry_date, status, payment_status)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO members (member_id, name, plan_id, joined_date, expiry_date, status, payment_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       `,
-      [name, plan_id, formattedJoinedDate, formattedExpiryDate, status || 'Active', payment_status || 'Paid']
+      [generatedMemberId, name, plan_id, formattedJoinedDate, formattedExpiryDate, status || 'Active', payment_status || 'Paid']
     );
 
-    const newMemberId = insertResult.insertId;
-
-    // 4. OPTIONAL: GUMAWA RIN NG ENTRY SA RENEWAL_LOGS PARA SA INITIAL PAYMENT TRANSACTION
+    // 5. I-INSERT DIN SA TRANSACTIONS (RENEWAL_LOGS) GAMIT ANG GENERATED ID
     await connection.query(
       `
       INSERT INTO renewal_logs (member_id, plan_id, amount_paid, payment_status, new_expiry_date)
       VALUES (?, ?, ?, ?, ?)
       `,
-      [newMemberId, plan_id, plan.price, payment_status || 'Paid', formattedExpiryDate]
+      [generatedMemberId, plan_id, plan.price, payment_status || 'Paid', formattedExpiryDate]
     );
 
     await connection.commit();
@@ -180,7 +181,7 @@ exports.createMember = async (req, res) => {
     res.status(201).json({
       status: 'success',
       message: 'SYSTEM_LOG: New athlete profile deployed to core matrix.',
-      memberId: newMemberId
+      memberId: generatedMemberId
     });
 
   } catch (error) {
