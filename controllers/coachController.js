@@ -4,7 +4,7 @@ const db = require('../config/db');
 // @route   GET /api/coaches
 exports.getCoaches = async (req, res) => {
   try {
-    // ALIGNMENT FIX: Ginawang 'coach_id AS id' upang direktang pumasok sa key mapping ng frontend React views
+    // ALIGNMENT FIX: Isinama ang 'coach_id AS id' para eksaktong tumugma sa key loops ng iyong frontend component views
     const [rows] = await db.query(`
       SELECT 
         coach_id AS id, 
@@ -62,4 +62,3 @@ exports.createCoach = async (req, res) => {
     connection.release();
   }
 };
-};s

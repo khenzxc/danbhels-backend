@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
-// Isinama ang createCoach handler mula sa controller matrix
 const { getCoaches, createCoach } = require('../controllers/coachController');
 
+// @pipeline  GET /api/coaches
 router.get('/', getCoaches);
 
-// PIPELINE NODE: Saluhin ang POST request para sa pag-add ng coach
+// @pipeline  POST /api/coaches
 router.post('/', createCoach);
 
 module.exports = router;
