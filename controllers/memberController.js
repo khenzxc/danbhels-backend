@@ -4,22 +4,24 @@ const db = require('../config/db');
 // @route   GET /api/members
 exports.getMembers = async (req, res) => {
   try {
+    // I-update ito sa loob ng exports.getMembers sa membersController.js
     const [rows] = await db.query(`
-      SELECT 
-        m.member_id AS id, 
-        m.name, 
-        p.plan_name AS plan, 
-        DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        -- SYSTEM_AUTO_CHECK: Kung ang expiry_date ay nakalipas na kumpara sa kasalukuyang petsa, 'Expired' ang iluluwas nito dynamically
-        CASE 
-          WHEN m.expiry_date < CURDATE() THEN 'Expired'
-          ELSE m.status 
-        END AS status, 
-        m.payment_status AS payment, 
-        DATE_FORMAT(m.joined_date, '%Y-%m-%d') AS joined
-      FROM members m
-      LEFT JOIN plans p ON m.plan_id = p.plan_id
-    `);
+  SELECT 
+    m.member_id AS id, 
+    m.name, 
+    p.plan_name AS plan, 
+    DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
+    -- SAFE TIMEZONE CHECK: Kung ang expiry_date ay mas mababa o katumbas na ng kasalukuyang petsa, 'Expired' na agad
+    CASE 
+      WHEN m.expiry_date < CURDATE() THEN 'Expired'
+      WHEN m.expiry_date = CURDATE() AND p.duration_days = 1 THEN 'Expired' -- Kung 1 day pass at araw na ng expiry, expired na dapat ngayong araw
+      ELSE m.status 
+    END AS status, 
+    m.payment_status AS payment, 
+    DATE_FORMAT(m.joined_date, '%Y-%m-%d') AS joined
+  FROM members m
+  LEFT JOIN plans p ON m.plan_id = p.plan_id
+`);
     res.json(rows);
   } catch (error) {
     console.error(error);
@@ -78,7 +80,7 @@ exports.renewMember = async (req, res) => {
     } else {
       // Kung bagong renew (expired na siya) O kaya nag-avail ng ONE_DAY pass ngayon:
       baseDate = today;
-      
+
       // KUNG HINDI ONE_DAY, tsaka lang natin dadagdagan ng mga araw. 
       // Kung ONE_DAY, mananatiling 'today' ang petsa para mag-expire mamayang 11:59 PM (hatinggabi).
       if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
@@ -167,7 +169,7 @@ exports.createMember = async (req, res) => {
       // Normal na dagdag ng araw para sa mga buwanang plano (30 days, etc.)
       expiryDateObj.setDate(today.getDate() + Number(plan.duration_days || 30));
     }
-    
+
     const formattedJoinedDate = today.toISOString().split('T')[0];
     const formattedExpiryDate = expiryDateObj.toISOString().split('T')[0];
     // ---------------------------------
