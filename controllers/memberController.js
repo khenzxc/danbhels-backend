@@ -1,10 +1,10 @@
 const db = require('../config/db');
 
-// Helper function para makuha ang Local Date YYYY-MM-DD (Umiwas sa UTC ISOString bug)
-const getLocalDateString = (dateObj) => {
-  const offset = dateObj.getTimezoneOffset();
-  const localDate = new Date(dateObj.getTime() - (offset * 60 * 1000));
-  return localDate.toISOString().split('T')[0];
+// --- SAFE TIMEZONE HELPER (ASIA/MANILA) ---
+// Sinasalba nito ang server-side UTC timezone drift ng Vercel / Render.
+const getLocalDateString = (dateObj = new Date()) => {
+  return dateObj.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+  // Ang 'en-CA' ay direktang nagbibigay ng malinis na format na YYYY-MM-DD
 };
 
 // @desc    Kuhanin ang buong listahan ng gym members
@@ -17,10 +17,14 @@ exports.getMembers = async (req, res) => {
         m.name, 
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        -- KUNG KASALUKUYANG ARAW O NAKARAAN NA: Expired na agad pagpatak ng araw na 'yun o pag lumipas na
+        -- TAMANG EXPIRY QUERY LOGIC:
+        -- 1. Kapag ang expiry_date ay nakalipas na kumpara sa CURDATE(), 'Expired' na talaga siya.
+        -- 2. Kapag ang expiry_date ay NGAYONG ARAW (Equal sa CURDATE()), at ito ay ONE_DAY pass,
+        --    mananatili itong 'Active' buong araw at magiging 'Expired' paglampas ng 11:59 PM (bukas na araw).
+        -- 3. Pinupuwersa din nitong maging 'Active' ang display status kung ang expiry_date ay valid pa kahit 'Expired' ang nakasulat sa row text.
         CASE 
           WHEN m.expiry_date < CURDATE() THEN 'Expired'
-          WHEN m.expiry_date = CURDATE() AND (p.plan_id = 'ONE_DAY' OR p.duration_days = 1) THEN 'Expired'
+          WHEN m.expiry_date >= CURDATE() AND m.status = 'Expired' THEN 'Active'
           ELSE m.status 
         END AS status, 
         m.payment_status AS payment, 
@@ -44,7 +48,7 @@ exports.renewMember = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // 1. KUNIN ANG PLANO
+    // 1. KUNIN ANG PLANO (SOURCE OF TRUTH)
     const [planRows] = await connection.query(
       `SELECT plan_id, plan_name, price, duration_days FROM plans WHERE plan_id = ?`,
       [plan_id]
@@ -68,34 +72,34 @@ exports.renewMember = async (req, res) => {
     }
     const member = memberRows[0];
 
-// 3. LOGIC FIX: TAMANG PAGKUKALKULA NG RENEWAL PARA SA DAILY PASS
-    let baseDate = new Date(); // KUKUHA NG PETSA NGAYON (Local Server Time)
-    const todayStr = getLocalDateString(baseDate);
+    // 3. TAMANG PAGKUKALKULA NG RENEWAL/EXTENSION DATES
+    const todayStr = getLocalDateString(); // Laging nakabase sa Manila Date (e.g. "2026-06-22")
     const currentExpiryStr = member.expiry_date ? getLocalDateString(new Date(member.expiry_date)) : null;
 
-    // Tingnan kung Active pa ang account AT magpapalawig lang (Hindi ONE_DAY)
+    // Ang extension ay mangyayari lamang kung ang member ay ACTIVE pa, mas mahaba ang expiry sa araw na ito,
+    // at HINDI 'ONE_DAY' pass ang kanyang nirerenew.
     const isExtension = currentExpiryStr &&
       currentExpiryStr > todayStr &&
       member.status === 'Active' &&
       plan_id !== 'ONE_DAY' &&
       Number(plan.duration_days) !== 1;
 
+    let baseDate = new Date();
+
     if (isExtension) {
-      // KUNG ACTIVE PA AT EXTENSION: Doon magsisimula ang dagdag sa dulo ng kasalukuyang expiry_date
+      // Kung active extension, doon magsisimula ang dagdag sa dulo ng kanyang kasalukuyang expiry_date
       baseDate = new Date(member.expiry_date);
       baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
     } else {
-      // KUNG EXPIRED NA AT RENEWAL (Dito papasok ang Daily Pass mo):
-      // Ang baseDate ay itatakda NATIN NGAYONG ARAW.
+      // Kung expired na o bagong walk-in daily pass, magsisimula ang bilang NGAYONG ARAW.
       baseDate = new Date(); 
 
-      // Kung HINDI daily pass (e.g., 30 days, 60 days), tsaka lang natin dadagdagan ng araw ang baseDate.
+      // Kung HINDI daily pass, doon pa lang natin dadagdagan ng kaaukulang bilang ng araw.
       if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
         baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
       }
-      // NOTE: Kung ONE_DAY pass ito, HINDI natin dadagdagan ang araw. 
-      // Ang baseDate ay mananatiling "PETSA NGAYON". Dahil dito, ang expiry_date niya ay magiging "NGAYON".
-      // Ibig sabihin, VALID siya buong araw na ito at mag-eexpire pagpatak ng 12:00 AM bukas.
+      // NOTE: Kapag ONE_DAY, ang baseDate ay mananatiling petsa ngayon. 
+      // Ise-save ito bilang expiry date ngayon upang gumana ang 11:59 PM expiration limit.
     }
     
     const newExpiryDate = getLocalDateString(baseDate);
@@ -168,22 +172,21 @@ exports.createMember = async (req, res) => {
     const randomDigits = Math.floor(100 + Math.random() * 900);
     const generatedMemberId = `IR-${randomDigits}`;
 
-    // --- FIX: SAFE LOCAL DATE LOGIC ---
-    const today = new Date();
-    const expiryDateObj = new Date();
+    // --- MANILA TIMEZONE - SAFE REGISTRATION DATE LOGIC ---
+    const todayStr = getLocalDateString(); // Halimbawa: "2026-06-22"
+    let expiryDateObj = new Date();
 
-    // Kung ONE_DAY o duration ay 1, ang expiry_date ay "Ngayong araw" din.
+    // Kung ONE_DAY pass, ang nakatagong expiry date string ay kapareho lang ng araw na ito.
     if (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) {
-      // Hindi gagalawin ang expiryDateObj, ibig sabihin itatakda ito sa petsa NGAYON.
-      expiryDateObj.setDate(today.getDate());
+      // Mananatiling walang dagdag ang expiryDateObj para maging katumbas ng araw na ito
     } else {
-      // Kung buwanan o higit pa, doon lang magdadagdag ng araw.
-      expiryDateObj.setDate(today.getDate() + Number(plan.duration_days || 30));
+      // Para sa mga Monthly, 3 Months, atbp.
+      expiryDateObj.setDate(expiryDateObj.getDate() + Number(plan.duration_days || 30));
     }
 
-    const formattedJoinedDate = getLocalDateString(today);
+    const formattedJoinedDate = todayStr;
     const formattedExpiryDate = getLocalDateString(expiryDateObj);
-    // ---------------------------------
+    // -----------------------------------------------------
 
     await connection.query(
       `
