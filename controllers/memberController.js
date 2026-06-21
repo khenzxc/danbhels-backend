@@ -10,7 +10,11 @@ exports.getMembers = async (req, res) => {
         m.name, 
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        m.status, 
+        -- SYSTEM_AUTO_CHECK: Kung ang expiry_date ay nakalipas na kumpara sa kasalukuyang petsa, 'Expired' ang iluluwas nito dynamically
+        CASE 
+          WHEN m.expiry_date < CURDATE() THEN 'Expired'
+          ELSE m.status 
+        END AS status, 
         m.payment_status AS payment, 
         DATE_FORMAT(m.joined_date, '%Y-%m-%d') AS joined
       FROM members m
@@ -19,10 +23,7 @@ exports.getMembers = async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ 
-      error: 'SYSTEM_ERROR: Fetching member ledger failed.',
-      details: error.message 
-    });
+    res.status(500).json({ error: 'SYSTEM_ERROR: Fetching member ledger failed.' });
   }
 };
 
@@ -64,19 +65,26 @@ exports.renewMember = async (req, res) => {
     const today = new Date();
     const currentExpiry = member.expiry_date ? new Date(member.expiry_date) : null;
 
+    // Kung active pa at hindi ONE_DAY, pwede siyang magpa-extend ng araw sa dulo ng kasalukuyang expiry niya
     const isExtension = currentExpiry &&
       currentExpiry > today &&
       member.status === 'Active' &&
-      plan.plan_id !== 'ONE_DAY';
+      plan_id !== 'ONE_DAY';
 
     if (isExtension) {
       baseDate = new Date(currentExpiry.getTime());
+      // Dagdagan ng araw base sa piniling plano (30 days, etc.)
+      baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
     } else {
+      // Kung bagong renew (expired na siya) O kaya nag-avail ng ONE_DAY pass ngayon:
       baseDate = today;
+      
+      // KUNG HINDI ONE_DAY, tsaka lang natin dadagdagan ng mga araw. 
+      // Kung ONE_DAY, mananatiling 'today' ang petsa para mag-expire mamayang 11:59 PM (hatinggabi).
+      if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
+        baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
+      }
     }
-
-    // 4. DAGDAGAN NG DURASYON NG PLANO
-    baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
     const newExpiryDate = baseDate.toISOString().split('T')[0];
 
     // 5. I-UPDATE ANG PROFILING NG GYM MEMBER
@@ -126,7 +134,6 @@ exports.renewMember = async (req, res) => {
 
 // @desc    Magrehistro ng bagong miyembro/atleta sa matrix pipeline
 // @route   POST /api/members
-// FIXED: Binago upang i-support ang VARCHAR member_id (IR-XXX format) para hindi mag-500 Error sa MySQL
 exports.createMember = async (req, res) => {
   const { name, plan_id, status, payment_status } = req.body;
   const connection = await db.getConnection();
@@ -134,9 +141,8 @@ exports.createMember = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // 1. KUNIN ANG IMPORMASYON NG PLANO UPANG MAKUHA ANG DURATION_DAYS
     const [planRows] = await connection.query(
-      `SELECT plan_name, price, duration_days FROM plans WHERE plan_id = ?`,
+      `SELECT plan_id, plan_name, price, duration_days FROM plans WHERE plan_id = ?`,
       [plan_id]
     );
 
@@ -146,19 +152,26 @@ exports.createMember = async (req, res) => {
     }
     const plan = planRows[0];
 
-    // 2. FIXED: GENERATE CUSTOM 'IR-' PREFIX MEMBER_ID (Dahil VARCHAR at hindi auto-increment)
-    const randomDigits = Math.floor(100 + Math.random() * 900); // Naglilikha ng random 3 digits (100-999)
+    const randomDigits = Math.floor(100 + Math.random() * 900);
     const generatedMemberId = `IR-${randomDigits}`;
 
-    // 3. KALKULAHIN ANG EXPIRY DATE MULA SA KASALUKUYANG ARAW (joined_date)
+    // --- BAGONG LOGIC PARA SA PETSA ---
     const today = new Date();
     const expiryDateObj = new Date();
-    expiryDateObj.setDate(today.getDate() + Number(plan.duration_days || 30));
+
+    // KUNG ANG PLAN_ID AY PARA SA DAILY PASS / 1 DAY
+    if (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) {
+      // Ang expiry_date ay ngayon ding araw na 'to, para pagpatak ng 12:00 AM bukas, EXPIRED na siya.
+      expiryDateObj.setDate(today.getDate());
+    } else {
+      // Normal na dagdag ng araw para sa mga buwanang plano (30 days, etc.)
+      expiryDateObj.setDate(today.getDate() + Number(plan.duration_days || 30));
+    }
     
     const formattedJoinedDate = today.toISOString().split('T')[0];
     const formattedExpiryDate = expiryDateObj.toISOString().split('T')[0];
+    // ---------------------------------
 
-    // 4. FIXED SQL INSERT: Isinama na ang 'member_id' field sa query statement array
     await connection.query(
       `
       INSERT INTO members (member_id, name, plan_id, joined_date, expiry_date, status, payment_status)
@@ -167,7 +180,6 @@ exports.createMember = async (req, res) => {
       [generatedMemberId, name, plan_id, formattedJoinedDate, formattedExpiryDate, status || 'Active', payment_status || 'Paid']
     );
 
-    // 5. I-INSERT DIN SA TRANSACTIONS (RENEWAL_LOGS) GAMIT ANG GENERATED ID
     await connection.query(
       `
       INSERT INTO renewal_logs (member_id, plan_id, amount_paid, payment_status, new_expiry_date)
@@ -177,20 +189,12 @@ exports.createMember = async (req, res) => {
     );
 
     await connection.commit();
-
-    res.status(201).json({
-      status: 'success',
-      message: 'SYSTEM_LOG: New athlete profile deployed to core matrix.',
-      memberId: generatedMemberId
-    });
+    res.status(201).json({ status: 'success', memberId: generatedMemberId });
 
   } catch (error) {
     await connection.rollback();
     console.error('// CRITICAL_MEMBER_CREATION_FAILED:', error);
-    res.status(500).json({ 
-      error: 'REGISTRATION_PIPELINE_FAILED', 
-      details: error.message 
-    });
+    res.status(500).json({ error: 'REGISTRATION_PIPELINE_FAILED' });
   } finally {
     connection.release();
   }
