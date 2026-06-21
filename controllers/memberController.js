@@ -68,12 +68,12 @@ exports.renewMember = async (req, res) => {
     }
     const member = memberRows[0];
 
-    // 3. LOGIC FIX: LOCAL DATE HANDLING AT ONE_DAY EXPIRY
-    let baseDate = new Date(); // Ngayong araw (Local Server Time)
+// 3. LOGIC FIX: TAMANG PAGKUKALKULA NG RENEWAL PARA SA DAILY PASS
+    let baseDate = new Date(); // KUKUHA NG PETSA NGAYON (Local Server Time)
     const todayStr = getLocalDateString(baseDate);
     const currentExpiryStr = member.expiry_date ? getLocalDateString(new Date(member.expiry_date)) : null;
 
-    // Mas ligtas na string comparison para sa dates upang maiwasan ang timezone shifts
+    // Tingnan kung Active pa ang account AT magpapalawig lang (Hindi ONE_DAY)
     const isExtension = currentExpiryStr &&
       currentExpiryStr > todayStr &&
       member.status === 'Active' &&
@@ -81,19 +81,21 @@ exports.renewMember = async (req, res) => {
       Number(plan.duration_days) !== 1;
 
     if (isExtension) {
-      // Kung active pa, doon magsisimula ang dagdag sa dulo ng kasalukuyang expiry_date
+      // KUNG ACTIVE PA AT EXTENSION: Doon magsisimula ang dagdag sa dulo ng kasalukuyang expiry_date
       baseDate = new Date(member.expiry_date);
       baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
     } else {
-      // Kung expired na OR nag-avail ng ONE_DAY pass ngayon:
-      baseDate = new Date(); // Magsisimula ngayon ang bilang
+      // KUNG EXPIRED NA AT RENEWAL (Dito papasok ang Daily Pass mo):
+      // Ang baseDate ay itatakda NATIN NGAYONG ARAW.
+      baseDate = new Date(); 
 
-      // KUNG HINDI ONE_DAY / 1 DAY PASS, tsaka lang natin papatingkarin o dadagdagan ng mga araw ang membership.
+      // Kung HINDI daily pass (e.g., 30 days, 60 days), tsaka lang natin dadagdagan ng araw ang baseDate.
       if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
         baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
       }
-      // NOTE: Kung ONE_DAY pass ito, HINDI dadagdagan ang araw. Ang baseDate ay mananatiling "Ngayong Araw".
-      // Pagpatak ng 12:00 AM bukas, automatic siyang 'Expired' sa ating `getMembers` query.
+      // NOTE: Kung ONE_DAY pass ito, HINDI natin dadagdagan ang araw. 
+      // Ang baseDate ay mananatiling "PETSA NGAYON". Dahil dito, ang expiry_date niya ay magiging "NGAYON".
+      // Ibig sabihin, VALID siya buong araw na ito at mag-eexpire pagpatak ng 12:00 AM bukas.
     }
     
     const newExpiryDate = getLocalDateString(baseDate);
