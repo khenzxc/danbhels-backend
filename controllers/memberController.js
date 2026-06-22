@@ -1,10 +1,9 @@
 const db = require('../config/db');
 
 // --- SAFE TIMEZONE HELPER (ASIA/MANILA) ---
-// Sinasalba nito ang server-side UTC timezone drift ng Vercel / Render.
 const getLocalDateString = (dateObj = new Date()) => {
   return dateObj.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
-  // Ang 'en-CA' ay direktang nagbibigay ng malinis na format na YYYY-MM-DD
+  // Nagbabalik ng format na YYYY-MM-DD base sa oras sa Pilipinas
 };
 
 // @desc    Kuhanin ang buong listahan ng gym members
@@ -18,14 +17,11 @@ exports.getMembers = async (req, res) => {
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
         -- TAMANG EXPIRY QUERY LOGIC:
-        -- 1. Kapag ang expiry_date ay nakalipas na kumpara sa CURDATE(), 'Expired' na talaga siya.
-        -- 2. Kapag ang expiry_date ay NGAYONG ARAW (Equal sa CURDATE()), at ito ay ONE_DAY pass,
-        --    mananatili itong 'Active' buong araw at magiging 'Expired' paglampas ng 11:59 PM (bukas na araw).
-        -- 3. Pinupuwersa din nitong maging 'Active' ang display status kung ang expiry_date ay valid pa kahit 'Expired' ang nakasulat sa row text.
+        -- 1. Kapag ang expiry_date ay mas mababa sa kasalukuyang petsa (CURDATE()), 'Expired' na talaga siya.
+        -- 2. Kung ang expiry_date ay katumbas o higit pa sa CURDATE(), awtomatiko siyang 'Active' sa frontend.
         CASE 
           WHEN m.expiry_date < CURDATE() THEN 'Expired'
-          WHEN m.expiry_date >= CURDATE() AND m.status = 'Expired' THEN 'Active'
-          ELSE m.status 
+          ELSE 'Active' 
         END AS status, 
         m.payment_status AS payment, 
         DATE_FORMAT(m.joined_date, '%Y-%m-%d') AS joined
@@ -48,7 +44,7 @@ exports.renewMember = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // 1. KUNIN ANG PLANO (SOURCE OF TRUTH)
+    // 1. KUNIN ANG PLANO
     const [planRows] = await connection.query(
       `SELECT plan_id, plan_name, price, duration_days FROM plans WHERE plan_id = ?`,
       [plan_id]
@@ -72,37 +68,34 @@ exports.renewMember = async (req, res) => {
     }
     const member = memberRows[0];
 
-    // 3. TAMANG PAGKUKALKULA NG RENEWAL/EXTENSION DATES
-    const todayStr = getLocalDateString(); // Laging nakabase sa Manila Date (e.g. "2026-06-22")
+    // 3. CRITICAL LOGIC FIX: EXTEND VS NEW RENEWAL
+    const todayStr = getLocalDateString(); 
     const currentExpiryStr = member.expiry_date ? getLocalDateString(new Date(member.expiry_date)) : null;
 
-    // Ang extension ay mangyayari lamang kung ang member ay ACTIVE pa, mas mahaba ang expiry sa araw na ito,
-    // at HINDI 'ONE_DAY' pass ang kanyang nirerenew.
-    const isExtension = currentExpiryStr &&
-      currentExpiryStr > todayStr &&
-      member.status === 'Active' &&
-      plan_id !== 'ONE_DAY' &&
-      Number(plan.duration_days) !== 1;
+    // MAG-EEXTEND LANG: Kung may expiry date siya, HINDI pa ito lumalagpas sa araw na ito,
+    // at HINDI 'ONE_DAY' pass ang binibili niya.
+    const isExtension = currentExpiryStr && 
+                        currentExpiryStr >= todayStr && 
+                        member.status !== 'Expired';
 
-    let baseDate = new Date();
+    let calculatedDate;
 
     if (isExtension) {
-      // Kung active extension, doon magsisimula ang dagdag sa dulo ng kanyang kasalukuyang expiry_date
-      baseDate = new Date(member.expiry_date);
-      baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
+      // === KUNG HINDI PA EXPIRED (MAG-EEXTEND SA DULO NG LUMANG EXPIRY) ===
+      calculatedDate = new Date(member.expiry_date);
+      calculatedDate.setDate(calculatedDate.getDate() + Number(plan.duration_days || 30));
     } else {
-      // Kung expired na o bagong walk-in daily pass, magsisimula ang bilang NGAYONG ARAW.
-      baseDate = new Date(); 
+      // === KUNG EXPIRED NA (MAGSISISIMULA NGAYONG ARAW ANG BILANG) ===
+      calculatedDate = new Date(); // Petsa Ngayon
 
-      // Kung HINDI daily pass, doon pa lang natin dadagdagan ng kaaukulang bilang ng araw.
+      // Kung regular plan (30 days, 6 months, etc.), magdagdag ng araw mula NGAYONG ARAW.
+      // Kung ONE_DAY o 1 day duration, mananatili itong ngayong araw para mag-expire mamayang 11:59 PM.
       if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
-        baseDate.setDate(baseDate.getDate() + Number(plan.duration_days || 30));
+        calculatedDate.setDate(calculatedDate.getDate() + Number(plan.duration_days || 30));
       }
-      // NOTE: Kapag ONE_DAY, ang baseDate ay mananatiling petsa ngayon. 
-      // Ise-save ito bilang expiry date ngayon upang gumana ang 11:59 PM expiration limit.
     }
     
-    const newExpiryDate = getLocalDateString(baseDate);
+    const newExpiryDate = getLocalDateString(calculatedDate);
 
     // 5. I-UPDATE ANG PROFILING NG GYM MEMBER
     await connection.query(
@@ -172,15 +165,15 @@ exports.createMember = async (req, res) => {
     const randomDigits = Math.floor(100 + Math.random() * 900);
     const generatedMemberId = `IR-${randomDigits}`;
 
-    // --- MANILA TIMEZONE - SAFE REGISTRATION DATE LOGIC ---
-    const todayStr = getLocalDateString(); // Halimbawa: "2026-06-22"
-    let expiryDateObj = new Date();
+    // --- MANILA TIMEZONE LOGIC PARA SA BAGONG MEMBER ---
+    const todayStr = getLocalDateString(); 
+    let expiryDateObj = new Date(); // Magsisimula ngayon ang bilang ng bagong gawa
 
-    // Kung ONE_DAY pass, ang nakatagong expiry date string ay kapareho lang ng araw na ito.
+    // Kung ONE_DAY o duration ay 1, ang expiry_date ay magiging "Ngayong araw" din.
     if (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) {
-      // Mananatiling walang dagdag ang expiryDateObj para maging katumbas ng araw na ito
+      // Walang dadagdagang araw para mag-expire mamayang hatinggabi.
     } else {
-      // Para sa mga Monthly, 3 Months, atbp.
+      // Magdaragdag ng araw mula sa kasalukuyang petsa.
       expiryDateObj.setDate(expiryDateObj.getDate() + Number(plan.duration_days || 30));
     }
 
@@ -193,7 +186,7 @@ exports.createMember = async (req, res) => {
       INSERT INTO members (member_id, name, plan_id, joined_date, expiry_date, status, payment_status)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       `,
-      [generatedMemberId, name, plan_id, formattedJoinedDate, formattedExpiryDate, status || 'Active', payment_status || 'Paid']
+      [generatedMemberId, name, plan_id, formattedJoinedDate, formattedExpiryDate, 'Active', payment_status || 'Paid']
     );
 
     await connection.query(
