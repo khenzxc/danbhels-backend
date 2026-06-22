@@ -6,6 +6,12 @@ const getLocalDateString = (dateObj = new Date()) => {
   // Nagbabalik ng format na YYYY-MM-DD base sa oras sa Pilipinas
 };
 
+// Helper para gumawa ng ligtas na Date instance na sumusunod sa oras ng Pilipinas
+const getManilaDate = () => {
+  const manilaStr = getLocalDateString(); // Halimbawa: "2026-06-23"
+  return new Date(manilaStr);
+};
+
 // @desc    Kuhanin ang buong listahan ng gym members
 // @route   GET /api/members
 exports.getMembers = async (req, res) => {
@@ -16,11 +22,10 @@ exports.getMembers = async (req, res) => {
         m.name, 
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        -- TAMANG EXPIRY QUERY LOGIC:
-        -- 1. Kapag ang expiry_date ay mas mababa sa kasalukuyang petsa (CURDATE()), 'Expired' na talaga siya.
-        -- 2. Kung ang expiry_date ay katumbas o higit pa sa CURDATE(), awtomatiko siyang 'Active' sa frontend.
+        -- CRITICAL BUG FIX: Ginawang <= para kung sumapit ang araw ng expiry, Expired na agad siya.
+        -- Gumagamit ng CONVERT_TZ para laging katugma ng kasalukuyang petsa sa Pilipinas (+08:00).
         CASE 
-          WHEN m.expiry_date < CURDATE() THEN 'Expired'
+          WHEN m.expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')) THEN 'Expired'
           ELSE 'Active' 
         END AS status, 
         m.payment_status AS payment, 
@@ -72,11 +77,9 @@ exports.renewMember = async (req, res) => {
     const todayStr = getLocalDateString(); 
     const currentExpiryStr = member.expiry_date ? getLocalDateString(new Date(member.expiry_date)) : null;
 
-    // MAG-EEXTEND LANG: Kung may expiry date siya, HINDI pa ito lumalagpas sa araw na ito,
-    // at HINDI 'ONE_DAY' pass ang binibili niya.
+    // MAG-EEXTEND LANG: Kung may expiry date siya at hindi pa ito expired ngayon.
     const isExtension = currentExpiryStr && 
-                        currentExpiryStr >= todayStr && 
-                        member.status !== 'Expired';
+                        currentExpiryStr > todayStr; // Inalis ang reliance sa lumang state
 
     let calculatedDate;
 
@@ -85,11 +88,9 @@ exports.renewMember = async (req, res) => {
       calculatedDate = new Date(member.expiry_date);
       calculatedDate.setDate(calculatedDate.getDate() + Number(plan.duration_days || 30));
     } else {
-      // === KUNG EXPIRED NA (MAGSISISIMULA NGAYONG ARAW ANG BILANG) ===
-      calculatedDate = new Date(); // Petsa Ngayon
+      // === KUNG EXPIRED NA (MAGSISISIMULA NGAYONG ARAW ANG BILANG BASE SA PILIPINAS) ===
+      calculatedDate = getManilaDate(); // <-- Ligtas na petsa ngayon sa Pilipinas
 
-      // Kung regular plan (30 days, 6 months, etc.), magdagdag ng araw mula NGAYONG ARAW.
-      // Kung ONE_DAY o 1 day duration, mananatili itong ngayong araw para mag-expire mamayang 11:59 PM.
       if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
         calculatedDate.setDate(calculatedDate.getDate() + Number(plan.duration_days || 30));
       }
@@ -167,19 +168,16 @@ exports.createMember = async (req, res) => {
 
     // --- MANILA TIMEZONE LOGIC PARA SA BAGONG MEMBER ---
     const todayStr = getLocalDateString(); 
-    let expiryDateObj = new Date(); // Magsisimula ngayon ang bilang ng bagong gawa
+    let expiryDateObj = getManilaDate(); // <-- Ligtas na petsa ngayon sa Pilipinas
 
-    // Kung ONE_DAY o duration ay 1, ang expiry_date ay magiging "Ngayong araw" din.
     if (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) {
-      // Walang dadagdagang araw para mag-expire mamayang hatinggabi.
+      // Walang dadagdagang araw
     } else {
-      // Magdaragdag ng araw mula sa kasalukuyang petsa.
       expiryDateObj.setDate(expiryDateObj.getDate() + Number(plan.duration_days || 30));
     }
 
     const formattedJoinedDate = todayStr;
     const formattedExpiryDate = getLocalDateString(expiryDateObj);
-    // -----------------------------------------------------
 
     await connection.query(
       `
