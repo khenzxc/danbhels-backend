@@ -19,7 +19,7 @@ exports.getSalesReport = async (req, res) => {
       SELECT COUNT(*) AS expired_system_locks FROM members WHERE LOWER(status) = 'expired'
     `);
 
-    // SALES LEDGER
+    // === SALES LEDGER (FIXED: Idinagdag na ang r.created_at AS date) ===
     const [ledgerRows] = await db.query(`
       SELECT
         r.transaction_id AS id,
@@ -27,7 +27,8 @@ exports.getSalesReport = async (req, res) => {
         p.plan_name AS plan,
         m.status,
         r.payment_status AS payment,
-        r.amount_paid
+        r.amount_paid,
+        r.created_at AS date -- <--- ITO ANG CRITICAL NA KULANG KANINA
       FROM renewal_logs r
       LEFT JOIN members m ON r.member_id = m.member_id
       LEFT JOIN plans p ON r.plan_id = p.plan_id
@@ -47,7 +48,7 @@ exports.getSalesReport = async (req, res) => {
   }
 };
 
-// @desc    Kuhanin ang pangunahing bilang at analytics para sa real-time admin metrics
+// @desc    Kuhanin ang pangunahing billing at analytics para sa real-time admin metrics
 // @route   GET /api/reports/metrics
 exports.getDashboardMetrics = async (req, res) => {
   try {
