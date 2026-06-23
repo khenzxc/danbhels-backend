@@ -3,12 +3,10 @@ const db = require('../config/db');
 // --- SAFE TIMEZONE HELPER (ASIA/MANILA) ---
 const getLocalDateString = (dateObj = new Date()) => {
   return dateObj.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
-  // Nagbabalik ng format na YYYY-MM-DD base sa oras sa Pilipinas
 };
 
-// Helper para gumawa ng ligtas na Date instance na sumusunod sa oras ng Pilipinas
 const getManilaDate = () => {
-  const manilaStr = getLocalDateString(); // Halimbawa: "2026-06-23"
+  const manilaStr = getLocalDateString(); 
   return new Date(manilaStr);
 };
 
@@ -22,8 +20,8 @@ exports.getMembers = async (req, res) => {
         m.name, 
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        -- CRITICAL BUG FIX: Ginawang <= para kung sumapit ang araw ng expiry, Expired na agad siya.
-        -- Gumagamit ng CONVERT_TZ para laging katugma ng kasalukuyang petsa sa Pilipinas (+08:00).
+        -- Tamang-tama ang `<=` mo rito. Pagpatak ng 12:00 AM ng araw ng expiry_date,
+        -- papasok na siya sa 'Expired' status dahil kapantay na nito ang kasalukuyang petsa.
         CASE 
           WHEN m.expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')) THEN 'Expired'
           ELSE 'Active' 
@@ -49,7 +47,6 @@ exports.renewMember = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    // 1. KUNIN ANG PLANO
     const [planRows] = await connection.query(
       `SELECT plan_id, plan_name, price, duration_days FROM plans WHERE plan_id = ?`,
       [plan_id]
@@ -61,7 +58,6 @@ exports.renewMember = async (req, res) => {
     }
     const plan = planRows[0];
 
-    // 2. KUNIN ANG KASALUKUYANG STATUS NG MEMBER
     const [memberRows] = await connection.query(
       `SELECT member_id, expiry_date, status FROM members WHERE member_id = ?`,
       [member_id]
@@ -73,32 +69,29 @@ exports.renewMember = async (req, res) => {
     }
     const member = memberRows[0];
 
-    // 3. CRITICAL LOGIC FIX: EXTEND VS NEW RENEWAL
     const todayStr = getLocalDateString(); 
     const currentExpiryStr = member.expiry_date ? getLocalDateString(new Date(member.expiry_date)) : null;
 
-    // MAG-EEXTEND LANG: Kung may expiry date siya at hindi pa ito expired ngayon.
-    const isExtension = currentExpiryStr && 
-                        currentExpiryStr > todayStr; // Inalis ang reliance sa lumang state
+    // Active lang ang extension kung ang expiry date sa database ay mas malaki sa araw na ito
+    const isExtension = currentExpiryStr && currentExpiryStr > todayStr; 
 
     let calculatedDate;
+    const duration = (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) ? 1 : Number(plan.duration_days || 30);
 
     if (isExtension) {
-      // === KUNG HINDI PA EXPIRED (MAG-EEXTEND SA DULO NG LUMANG EXPIRY) ===
+      // Kung nag-extend at Active pa, idugtong sa dulo ng lumang expiry ang duration
       calculatedDate = new Date(member.expiry_date);
-      calculatedDate.setDate(calculatedDate.getDate() + Number(plan.duration_days || 30));
+      calculatedDate.setDate(calculatedDate.getDate() + duration);
     } else {
-      // === KUNG EXPIRED NA (MAGSISISIMULA NGAYONG ARAW ANG BILANG BASE SA PILIPINAS) ===
-      calculatedDate = getManilaDate(); // <-- Ligtas na petsa ngayon sa Pilipinas
-
-      if (plan_id !== 'ONE_DAY' && Number(plan.duration_days) !== 1) {
-        calculatedDate.setDate(calculatedDate.getDate() + Number(plan.duration_days || 30));
-      }
+      // KUNG EXPIRED NA / DAILY PASS RENEWAL:
+      // Magsisimula ngayon (e.g. June 23) + 1 araw (duration ng daily). Ang bagsak ay June 24.
+      // Pagpatak ng 12:00 AM ng June 24, automatic na 'Expired' na siya agad sa system.
+      calculatedDate = getManilaDate(); 
+      calculatedDate.setDate(calculatedDate.getDate() + duration);
     }
     
     const newExpiryDate = getLocalDateString(calculatedDate);
 
-    // 5. I-UPDATE ANG PROFILING NG GYM MEMBER
     await connection.query(
       `
       UPDATE members
@@ -112,7 +105,6 @@ exports.renewMember = async (req, res) => {
       [plan_id, newExpiryDate, payment_status || 'Paid', member_id]
     );
 
-    // 6. I-REHISTRO SA TRANSACTION AUDIT TRAIL
     const transactionType = isExtension ? 'EXTEND' : 'RENEW';
 
     await connection.query(
@@ -146,7 +138,7 @@ exports.renewMember = async (req, res) => {
 // @desc    Magrehistro ng bagong miyembro/atleta sa matrix pipeline
 // @route   POST /api/members
 exports.createMember = async (req, res) => {
-  const { name, plan_id, status, payment_status } = req.body;
+  const { name, plan_id, payment_status } = req.body;
   const connection = await db.getConnection();
 
   try {
@@ -166,15 +158,13 @@ exports.createMember = async (req, res) => {
     const randomDigits = Math.floor(100 + Math.random() * 900);
     const generatedMemberId = `IR-${randomDigits}`;
 
-    // --- MANILA TIMEZONE LOGIC PARA SA BAGONG MEMBER ---
     const todayStr = getLocalDateString(); 
-    let expiryDateObj = getManilaDate(); // <-- Ligtas na petsa ngayon sa Pilipinas
+    let expiryDateObj = getManilaDate(); 
 
-    if (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) {
-      // Walang dadagdagang araw
-    } else {
-      expiryDateObj.setDate(expiryDateObj.getDate() + Number(plan.duration_days || 30));
-    }
+    // Kung 1 Day, magdadagdag ng eksaktong 1 araw para maging bukas ang expiry date.
+    // Bukas ng 12:00 AM, automatic 'Expired' na ang status sa DB query.
+    const duration = (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) ? 1 : Number(plan.duration_days || 30);
+    expiryDateObj.setDate(expiryDateObj.getDate() + duration);
 
     const formattedJoinedDate = todayStr;
     const formattedExpiryDate = getLocalDateString(expiryDateObj);
