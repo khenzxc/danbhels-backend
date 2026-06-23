@@ -5,11 +5,6 @@ const getLocalDateString = (dateObj = new Date()) => {
   return dateObj.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
 };
 
-const getManilaDate = () => {
-  const manilaStr = getLocalDateString(); 
-  return new Date(manilaStr);
-};
-
 // @desc    Kuhanin ang buong listahan ng gym members
 // @route   GET /api/members
 exports.getMembers = async (req, res) => {
@@ -20,8 +15,7 @@ exports.getMembers = async (req, res) => {
         m.name, 
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        -- Tamang-tama ang `<=` mo rito. Pagpatak ng 12:00 AM ng araw ng expiry_date,
-        -- papasok na siya sa 'Expired' status dahil kapantay na nito ang kasalukuyang petsa.
+        -- Pagpatak ng 12:00 AM ng araw ng expiry_date, Expired na siya agad.
         CASE 
           WHEN m.expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')) THEN 'Expired'
           ELSE 'Active' 
@@ -72,25 +66,28 @@ exports.renewMember = async (req, res) => {
     const todayStr = getLocalDateString(); 
     const currentExpiryStr = member.expiry_date ? getLocalDateString(new Date(member.expiry_date)) : null;
 
-    // Active lang ang extension kung ang expiry date sa database ay mas malaki sa araw na ito
+    // Mas malaki sa "ngayon" ibig sabihin may natitira pang araw (Active Extension)
     const isExtension = currentExpiryStr && currentExpiryStr > todayStr; 
-
-    let calculatedDate;
     const duration = (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) ? 1 : Number(plan.duration_days || 30);
 
+    let newExpiryDate;
+
     if (isExtension) {
-      // Kung nag-extend at Active pa, idugtong sa dulo ng lumang expiry ang duration
-      calculatedDate = new Date(member.expiry_date);
-      calculatedDate.setDate(calculatedDate.getDate() + duration);
+      // KUNG EXTENSION: Idagdag ang duration sa kasalukuyang expiry_date sa DB
+      const [dateResult] = await connection.query(
+        `SELECT DATE_FORMAT(DATE_ADD(?, INTERVAL ? DAY), '%Y-%m-%d') AS calculatedDate`,
+        [member.expiry_date, duration]
+      );
+      newExpiryDate = dateResult[0].calculatedDate;
     } else {
-      // KUNG EXPIRED NA / DAILY PASS RENEWAL:
-      // Magsisimula ngayon (e.g. June 23) + 1 araw (duration ng daily). Ang bagsak ay June 24.
-      // Pagpatak ng 12:00 AM ng June 24, automatic na 'Expired' na siya agad sa system.
-      calculatedDate = getManilaDate(); 
-      calculatedDate.setDate(calculatedDate.getDate() + duration);
+      // KUNG EXPIRED NA / DAILY PASS RENEWAL: 
+      // Ngayong araw sa Manila + duration ng plan. Kung 1 day, magiging bukas ang expiry.
+      const [dateResult] = await connection.query(
+        `SELECT DATE_FORMAT(DATE_ADD(DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')), INTERVAL ? DAY), '%Y-%m-%d') AS calculatedDate`,
+        [duration]
+      );
+      newExpiryDate = dateResult[0].calculatedDate;
     }
-    
-    const newExpiryDate = getLocalDateString(calculatedDate);
 
     await connection.query(
       `
@@ -159,22 +156,21 @@ exports.createMember = async (req, res) => {
     const generatedMemberId = `IR-${randomDigits}`;
 
     const todayStr = getLocalDateString(); 
-    let expiryDateObj = getManilaDate(); 
-
-    // Kung 1 Day, magdadagdag ng eksaktong 1 araw para maging bukas ang expiry date.
-    // Bukas ng 12:00 AM, automatic 'Expired' na ang status sa DB query.
     const duration = (plan_id === 'ONE_DAY' || Number(plan.duration_days) === 1) ? 1 : Number(plan.duration_days || 30);
-    expiryDateObj.setDate(expiryDateObj.getDate() + duration);
 
-    const formattedJoinedDate = todayStr;
-    const formattedExpiryDate = getLocalDateString(expiryDateObj);
+    // SQL-based calculation para sa bagong member registration expiration
+    const [dateResult] = await connection.query(
+      `SELECT DATE_FORMAT(DATE_ADD(DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')), INTERVAL ? DAY), '%Y-%m-%d') AS calculatedDate`,
+      [duration]
+    );
+    const formattedExpiryDate = dateResult[0].calculatedDate;
 
     await connection.query(
       `
       INSERT INTO members (member_id, name, plan_id, joined_date, expiry_date, status, payment_status)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       `,
-      [generatedMemberId, name, plan_id, formattedJoinedDate, formattedExpiryDate, 'Active', payment_status || 'Paid']
+      [generatedMemberId, name, plan_id, todayStr, formattedExpiryDate, 'Active', payment_status || 'Paid']
     );
 
     await connection.query(
