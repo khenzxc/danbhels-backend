@@ -8,32 +8,34 @@ exports.getSalesReport = async (req, res) => {
     const [revenueRows] = await db.query(`
       SELECT IFNULL(SUM(amount_paid), 0) AS gross_revenue FROM renewal_logs WHERE LOWER(payment_status) = 'paid'
     `);
-    
+
     // ACTIVE MEMBERS
     const [activeRows] = await db.query(`
       SELECT COUNT(*) AS live_active_nodes FROM members WHERE LOWER(status) = 'active'
     `);
-    
+
     // EXPIRED MEMBERS
     const [expiredRows] = await db.query(`
       SELECT COUNT(*) AS expired_system_locks FROM members WHERE LOWER(status) = 'expired'
     `);
 
     // SALES LEDGER
+    // SALES LEDGER WITH TIMELINE INJECTION
     const [ledgerRows] = await db.query(`
-      SELECT
-        r.transaction_id AS id,
-        m.name,
-        p.plan_name AS plan,
-        m.status,
-        r.payment_status AS payment,
-        r.amount_paid
-      FROM renewal_logs r
-      LEFT JOIN members m ON r.member_id = m.member_id
-      LEFT JOIN plans p ON r.plan_id = p.plan_id
-      ORDER BY r.transaction_id DESC
-      LIMIT 50
-    `);
+  SELECT
+    r.transaction_id AS id,
+    m.name,
+    p.plan_name AS plan,
+    m.status,
+    r.payment_status AS payment,
+    r.amount_paid,
+    r.renewal_date AS createdAt  -- <-- IDAGDAG ITONG FIELD NA ITO PARA SA WAVE CHART TIME STAMP
+  FROM renewal_logs r
+  LEFT JOIN members m ON r.member_id = m.member_id
+  LEFT JOIN plans p ON r.plan_id = p.plan_id
+  ORDER BY r.transaction_id DESC
+  LIMIT 50
+`);
 
     res.json({
       gross_revenue: revenueRows[0].gross_revenue,
