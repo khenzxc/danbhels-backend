@@ -4,7 +4,7 @@ const db = require('../config/db');
 // @route   GET /api/reports/sales
 exports.getSalesReport = async (req, res) => {
   try {
-    // FIXED: Kinuha lang ang revenue para sa CURRENT MONTH gamit ang YEAR() at MONTH() ng MySQL
+    // 1. REVENUE (CURRENT MONTH)
     const [revenueRows] = await db.query(`
       SELECT IFNULL(SUM(amount_paid), 0) AS gross_revenue 
       FROM renewal_logs 
@@ -13,23 +13,32 @@ exports.getSalesReport = async (req, res) => {
         AND MONTH(renewal_date) = MONTH(CURRENT_DATE())
     `);
 
-    // ACTIVE MEMBERS
+    // FIXED: Binubura ang dependency sa static status column para sa real-time accurate reflection
+    // ACTIVE MEMBERS: Ang expiry date ay mas malaki o katumbas ng petsa ngayon sa Manila (+08:00)
     const [activeRows] = await db.query(`
-      SELECT COUNT(*) AS live_active_nodes FROM members WHERE LOWER(status) = 'active'
+      SELECT COUNT(*) AS live_active_nodes 
+      FROM members 
+      WHERE expiry_date > DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00'))
     `);
 
-    // EXPIRED MEMBERS
+    // FIXED: EXPIRED MEMBERS: Ang expiry date ay lumipas o katumbas na ng araw na ito
     const [expiredRows] = await db.query(`
-      SELECT COUNT(*) AS expired_system_locks FROM members WHERE LOWER(status) = 'expired'
+      SELECT COUNT(*) AS expired_system_locks 
+      FROM members 
+      WHERE expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00'))
     `);
 
-    // SALES LEDGER
+    // 4. SALES LEDGER
     const [ledgerRows] = await db.query(`
       SELECT
         r.transaction_id AS id,
         m.name,
         p.plan_name AS plan,
-        m.status,
+        -- FIXED: I-sync ang dynamic badge computation dito sa ledger preview
+        CASE 
+          WHEN m.expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')) THEN 'Expired'
+          ELSE 'Active' 
+        END AS status,
         r.payment_status AS payment,
         r.amount_paid,
         r.renewal_date AS createdAt  
@@ -52,11 +61,10 @@ exports.getSalesReport = async (req, res) => {
   }
 };
 
-// @desc    Kuhanin ang pangunahing bilang at analytics para sa real-time admin metrics
+// @desc    Kuhanin ang pangunahing billing at analytics para sa real-time admin metrics
 // @route   GET /api/reports/metrics
 exports.getDashboardMetrics = async (req, res) => {
   try {
-    // FIXED: In-apply din dito ang filter para mag-match ang display sa dashboard widget mo
     const [revenueRows] = await db.query(`
       SELECT IFNULL(SUM(amount_paid), 0) AS gross_revenue 
       FROM renewal_logs 
@@ -65,12 +73,18 @@ exports.getDashboardMetrics = async (req, res) => {
         AND MONTH(renewal_date) = MONTH(CURRENT_DATE())
     `);
     
+    // FIXED: Ikinabit ang parehong time-zone check para siguradong tumugma sa kabilang view
     const [activeRows] = await db.query(`
-      SELECT COUNT(*) AS live_active_nodes FROM members WHERE LOWER(status) = 'active'
+      SELECT COUNT(*) AS live_active_nodes 
+      FROM members 
+      WHERE expiry_date > DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00'))
     `);
     
+    // FIXED: Ikinabit ang parehong time-zone check para siguradong tumugma sa kabilang view
     const [expiredRows] = await db.query(`
-      SELECT COUNT(*) AS expired_system_locks FROM members WHERE LOWER(status) = 'expired'
+      SELECT COUNT(*) AS expired_system_locks 
+      FROM members 
+      WHERE expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00'))
     `);
 
     res.json({
