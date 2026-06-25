@@ -9,7 +9,7 @@ const getLocalDateString = (dateObj = new Date()) => {
 // @route   GET /api/members
 exports.getMembers = async (req, res) => {
   try {
-    const [rows] = await db.query(`
+    const [rows] = await db.query(`e
       SELECT 
         m.member_id AS id, 
         m.name, 
