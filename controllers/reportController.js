@@ -83,28 +83,3 @@ exports.getDashboardMetrics = async (req, res) => {
     res.status(500).json({ error: 'METRICS_FETCH_FAILED' });
   }
 };
-
-// @desc    Kuhanin ang pangunahing bilang at analytics para sa real-time admin metrics
-// @route   GET /api/reports/metrics
-exports.getDashboardMetrics = async (req, res) => {
-  try {
-    const [revenueRows] = await db.query(`
-      SELECT IFNULL(SUM(amount_paid), 0) AS gross_revenue FROM renewal_logs WHERE LOWER(payment_status) = 'paid'
-    `);
-    const [activeRows] = await db.query(`
-      SELECT COUNT(*) AS live_active_nodes FROM members WHERE LOWER(status) = 'active'
-    `);
-    const [expiredRows] = await db.query(`
-      SELECT COUNT(*) AS expired_system_locks FROM members WHERE LOWER(status) = 'expired'
-    `);
-
-    res.json({
-      gross_revenue: revenueRows[0].gross_revenue,
-      live_active_nodes: activeRows[0].live_active_nodes,
-      expired_system_locks: expiredRows[0].expired_system_locks
-    });
-  } catch (error) {
-    console.error('METRICS_ERROR:', error);
-    res.status(500).json({ error: 'METRICS_FETCH_FAILED' });
-  }
-};
