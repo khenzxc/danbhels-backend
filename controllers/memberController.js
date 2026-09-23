@@ -9,13 +9,13 @@ const getLocalDateString = (dateObj = new Date()) => {
 // @route   GET /api/members
 exports.getMembers = async (req, res) => {
   try {
-    const [rows] = await db.query(`e
+    const [rows] = await db.query(`
       SELECT 
         m.member_id AS id, 
         m.name, 
+        m.email,
         p.plan_name AS plan, 
         DATE_FORMAT(m.expiry_date, '%Y-%m-%d') AS expiryDate, 
-        -- Pagpatak ng 12:00 AM ng araw ng expiry_date, Expired na siya agad.
         CASE 
           WHEN m.expiry_date <= DATE(CONVERT_TZ(NOW(), @@session.time_zone, '+08:00')) THEN 'Expired'
           ELSE 'Active' 
@@ -29,6 +29,112 @@ exports.getMembers = async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'SYSTEM_ERROR: Fetching member ledger failed.' });
+  }
+};
+
+exports.updateMember = async (req, res) => {
+  const memberId = req.params.memberId;
+  const { name, email, payment_status, plan_id } = req.body;
+  const updates = [];
+  const values = [];
+
+  if (typeof name === 'string' && name.trim()) {
+    updates.push('name = ?');
+    values.push(name.trim());
+  }
+
+  if (typeof email === 'string') {
+    const trimmedEmail = email.trim();
+    if (trimmedEmail) {
+      updates.push('email = ?');
+      values.push(trimmedEmail.toLowerCase());
+    }
+  }
+
+  if (plan_id) {
+    updates.push('plan_id = ?');
+    values.push(plan_id);
+  }
+
+  if (payment_status) {
+    updates.push('payment_status = ?');
+    values.push(payment_status);
+  }
+
+  if (!updates.length) {
+    return res.status(400).json({ error: 'NO_MEMBER_FIELDS_TO_UPDATE' });
+  }
+
+  try {
+    const [result] = await db.query(`UPDATE members SET ${updates.join(', ')} WHERE member_id = ?`, [...values, memberId]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'MEMBER_NOT_FOUND' });
+    }
+
+    res.json({ message: 'MEMBER_UPDATED' });
+  } catch (error) {
+    console.error('MEMBER_UPDATE_ERROR:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'EMAIL_ALREADY_IN_USE' });
+    }
+    res.status(500).json({ error: 'MEMBER_UPDATE_FAILED' });
+  }
+};
+
+exports.deleteMember = async (req, res) => {
+  const memberId = String(req.params.memberId || '').trim();
+  if (!memberId) return res.status(400).json({ error: 'MEMBER_ID_REQUIRED' });
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [members] = await connection.query(
+      'SELECT member_id FROM members WHERE member_id = ? FOR UPDATE',
+      [memberId]
+    );
+    if (!members.length) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'MEMBER_NOT_FOUND' });
+    }
+
+    await connection.query('DELETE FROM renewal_logs WHERE member_id = ?', [memberId]);
+    await connection.query('DELETE FROM members WHERE member_id = ?', [memberId]);
+    await connection.commit();
+
+    res.json({ message: 'MEMBER_DELETED', memberId });
+  } catch (error) {
+    await connection.rollback();
+    console.error('MEMBER_DELETE_ERROR:', error);
+    res.status(500).json({ error: 'MEMBER_DELETE_FAILED' });
+  } finally {
+    connection.release();
+  }
+};
+
+// @desc    Kuhanin ang renewal at registration history ng isang miyembro
+// @route   GET /api/members/:memberId/history
+exports.getMemberHistory = async (req, res) => {
+  try {
+    const [rows] = await db.query(`
+      SELECT
+        r.transaction_id AS id,
+        p.plan_name AS plan,
+        r.amount_paid AS amount,
+        CASE WHEN r.voided_at IS NULL THEN r.payment_status ELSE 'Voided' END AS payment,
+        r.voided_at AS voidedAt,
+        DATE_FORMAT(r.new_expiry_date, '%Y-%m-%d') AS expiryDate,
+        r.renewal_date AS createdAt
+      FROM renewal_logs r
+      LEFT JOIN plans p ON r.plan_id = p.plan_id
+      WHERE r.member_id = ?
+      ORDER BY r.transaction_id DESC
+    `, [req.params.memberId]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error('MEMBER_HISTORY_ERROR:', error);
+    res.status(500).json({ error: 'MEMBER_HISTORY_FETCH_FAILED' });
   }
 };
 
@@ -135,7 +241,7 @@ exports.renewMember = async (req, res) => {
 // @desc    Magrehistro ng bagong miyembro/atleta sa matrix pipeline
 // @route   POST /api/members
 exports.createMember = async (req, res) => {
-  const { name, plan_id, payment_status } = req.body;
+  const { name, email, plan_id, payment_status } = req.body;
   const connection = await db.getConnection();
 
   try {
@@ -167,10 +273,10 @@ exports.createMember = async (req, res) => {
 
     await connection.query(
       `
-      INSERT INTO members (member_id, name, plan_id, joined_date, expiry_date, status, payment_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO members (member_id, name, email, plan_id, joined_date, expiry_date, status, payment_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
-      [generatedMemberId, name, plan_id, todayStr, formattedExpiryDate, 'Active', payment_status || 'Paid']
+      [generatedMemberId, name, email || null, plan_id, todayStr, formattedExpiryDate, 'Active', payment_status || 'Paid']
     );
 
     await connection.query(

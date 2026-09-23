@@ -1,12 +1,14 @@
 const express = require('express');
 const router = express.Router();
-// FIXED: Idinagdag ang createMember handler mula sa iyong controller controller node
-const { getMembers, renewMember, createMember } = require('../controllers/memberController');
+const { authenticate, requireRoles } = require('../middleware/auth');
+const { getMembers, getMemberHistory, renewMember, createMember, updateMember, deleteMember } = require('../controllers/memberController');
 
-router.get('/', getMembers);
-router.post('/renew', renewMember);
-
-// FIXED GATEWAY Node: Para sa "POST /api/members" na tinatawagan ng AddMemberModal
-router.post('/', createMember);
+router.get('/', authenticate, requireRoles('admin', 'staff'), getMembers);
+router.get('/:memberId/history', authenticate, requireRoles('admin', 'staff'), getMemberHistory);
+router.post('/renew', authenticate, requireRoles('admin', 'staff'), renewMember);
+router.post('/', authenticate, requireRoles('admin', 'staff'), createMember);
+router.put('/:memberId', authenticate, requireRoles('admin'), updateMember);
+router.patch('/:memberId', authenticate, requireRoles('admin'), updateMember);
+router.delete('/:memberId', authenticate, requireRoles('admin'), deleteMember);
 
 module.exports = router;
